@@ -28,11 +28,46 @@ st.markdown(
     unsafe_allow_html=True
 )
 
-# 2. General Helper Utilities & Cache Functions
+# 2. Indian Currency Formatting Utility
+def format_indian_currency(number):
+    """
+    Formats a numeric value into the Indian numbering system (Lakh/Crore grouping)
+    with the ₹ symbol and two decimal places.
+    Example: 15727752.25 -> ₹1,57,27,752.25
+    """
+    try:
+        val = round(float(number), 2)
+        is_negative = val < 0
+        val = abs(val)
+        
+        parts = f"{val:.2f}".split('.')
+        int_part = parts[0]
+        dec_part = parts[1]
+        
+        if len(int_part) <= 3:
+            formatted_int = int_part
+        else:
+            last_three = int_part[-3:]
+            remaining = int_part[:-3]
+            
+            groups = []
+            while len(remaining) > 0:
+                groups.append(remaining[-2:])
+                remaining = remaining[:-2]
+            
+            groups.reverse()
+            formatted_int = ",".join(groups) + "," + last_three
+        
+        return f"₹{'-' if is_negative else ''}{formatted_int}.{dec_part}"
+    except Exception:
+        return f"₹{number}"
+
+# 3. Non-Cached CSV Exporter (Fixes the template caching bug)
 def convert_df_to_csv(dataframe):
-    """Converts a dataframe to a downloadable CSV byte stream dynamically."""
+    """Converts a dataframe to a downloadable CSV byte stream dynamically without caching."""
     return dataframe.to_csv(index=False).encode('utf-8')
 
+# 4. Schema-Aligned Mock Data Generators
 @st.cache_data
 def generate_mock_store_master():
     """Generates a mock Store Master dataframe matching expected schema."""
@@ -114,37 +149,7 @@ def generate_mock_retail_weekly_status(_store_master_df):
         data.append(row)
     return pd.DataFrame(data)
 
-# 3. Indian Currency Formatting Utility
-def format_indian_currency(number):
-    """Formats a numeric value into the Indian numbering system with ₹ symbol."""
-    try:
-        val = round(float(number), 2)
-        is_negative = val < 0
-        val = abs(val)
-        
-        parts = f"{val:.2f}".split('.')
-        int_part = parts[0]
-        dec_part = parts[1]
-        
-        if len(int_part) <= 3:
-            formatted_int = int_part
-        else:
-            last_three = int_part[-3:]
-            remaining = int_part[:-3]
-            
-            groups = []
-            while len(remaining) > 0:
-                groups.append(remaining[-2:])
-                remaining = remaining[:-2]
-            
-            groups.reverse()
-            formatted_int = ",".join(groups) + "," + last_three
-        
-        return f"₹{'-' if is_negative else ''}{formatted_int}.{dec_part}"
-    except Exception:
-        return f"₹{number}"
-
-# 4. Dynamic File Loader
+# 5. Dynamic File Loader
 def load_uploaded_file(uploaded_file):
     if uploaded_file is None:
         return None
@@ -157,8 +162,9 @@ def load_uploaded_file(uploaded_file):
         st.sidebar.error(f"Error loading {uploaded_file.name}: {e}")
     return None
 
-# 5. Header Normalization and Smart Merger
+# 6. Header Normalization and Smart Merger
 def normalize_column_headers(df):
+    """Converts column names to lowercase, strips spaces, and replaces spaces with underscores."""
     if df is not None:
         df.columns = df.columns.str.strip().str.lower().str.replace(' ', '_')
     return df
@@ -233,14 +239,33 @@ def conform_merged_dataframe(df, join_key):
         
     return df
 
-# 6. Sidebar File Integration Segment
+# 7. Sidebar File Integration Segment
 st.sidebar.title("📁 File Integration")
 st.sidebar.markdown("Upload both store records and weekly transactional records below.")
 
 store_file = st.sidebar.file_uploader("1. Upload Store Master (CSV/XLSX)", type=["csv", "xlsx"])
 weekly_file = st.sidebar.file_uploader("2. Upload Retail Weekly Status (CSV/XLSX)", type=["csv", "xlsx"])
 
-# 7. Sidebar Template Downloaders
+# Dynamic Data Loading Pipeline
+store_df = load_uploaded_file(store_file)
+if store_df is None:
+    store_df = generate_mock_store_master()
+    st.sidebar.info("Using mock Store Master dataset.")
+else:
+    st.sidebar.success("Store Master loaded.")
+
+weekly_df = load_uploaded_file(weekly_file)
+if weekly_df is None:
+    weekly_df = generate_mock_retail_weekly_status(store_df)
+    st.sidebar.info("Using mock Weekly Status dataset.")
+else:
+    st.sidebar.success("Weekly Status loaded.")
+
+# Process files through normalized merge pipeline
+merged_df, join_key = align_and_merge(weekly_df, store_df)
+merged_df = conform_merged_dataframe(merged_df, join_key)
+
+# 8. Sidebar Template Downloaders (Non-cached to prevent static caching issues)
 st.sidebar.markdown("---")
 st.sidebar.subheader("Template Downloads")
 
@@ -260,76 +285,59 @@ st.sidebar.download_button(
     mime="text/csv"
 )
 
-# 8. Data Ingestion Gatekeeping Logic (No mock fallbacks)
-data_loaded = False
-merged_df = pd.DataFrame()
+# 9. Sidebar Filter Interface
+st.sidebar.title("🔍 Operations Filters")
 
-if store_file is not None and weekly_file is not None:
-    store_df = load_uploaded_file(store_file)
-    weekly_df = load_uploaded_file(weekly_file)
-    
-    if store_df is not None and weekly_df is not None:
-        # Process files through normalized merge pipeline
-        merged_df, join_key = align_and_merge(weekly_df, store_df)
-        merged_df = conform_merged_dataframe(merged_df, join_key)
-        data_loaded = True
+def build_multi_select(column_name, display_label):
+    if column_name not in merged_df.columns:
+        return []
+    raw_vals = merged_df[column_name].dropna().unique()
+    try:
+        if column_name == 'week_start_date':
+            unique_vals = sorted(
+                list(raw_vals),
+                key=lambda x: pd.to_datetime(x, format='%d-%m-%Y', errors='coerce')
+            )
+        else:
+            unique_vals = sorted(list(raw_vals))
+    except TypeError:
+        unique_vals = sorted(list(raw_vals), key=lambda x: str(x))
 
-# 9. Sidebar Filter Interface (Conditionally displayed only when data is loaded)
-if data_loaded:
-    st.sidebar.title("🔍 Operations Filters")
+    selected = st.sidebar.multiselect(
+        label=display_label,
+        options=unique_vals,
+        placeholder="All values selected"
+    )
+    return selected
 
-    def build_multi_select(column_name, display_label):
-        if column_name not in merged_df.columns:
-            return []
-        raw_vals = merged_df[column_name].dropna().unique()
-        try:
-            if column_name == 'week_start_date':
-                unique_vals = sorted(
-                    list(raw_vals),
-                    key=lambda x: pd.to_datetime(x, format='%d-%m-%Y', errors='coerce')
-                )
-            else:
-                unique_vals = sorted(list(raw_vals))
-        except TypeError:
-            unique_vals = sorted(list(raw_vals), key=lambda x: str(x))
+selected_weeks = build_multi_select('week_start_date', 'Filter by Week')
+selected_regions = build_multi_select('region', 'Filter by Region')
+selected_cities = build_multi_select('city', 'Filter by City')
+selected_stores = build_multi_select('store_name', 'Filter by Store Name')
+selected_formats = build_multi_select('store_format', 'Filter by Store Format')
+selected_categories = build_multi_select('product_category', 'Filter by Product Category')
 
-        selected = st.sidebar.multiselect(
-            label=display_label,
-            options=unique_vals,
-            placeholder="All values selected"
-        )
-        return selected
-
-    selected_weeks = build_multi_select('week_start_date', 'Filter by Week')
-    selected_regions = build_multi_select('region', 'Filter by Region')
-    selected_cities = build_multi_select('city', 'Filter by City')
-    selected_stores = build_multi_select('store_name', 'Filter by Store Name')
-    selected_formats = build_multi_select('store_format', 'Filter by Store Format')
-    selected_categories = build_multi_select('product_category', 'Filter by Product Category')
-
-    # Apply Filters
-    filtered_df = merged_df.copy()
-    if selected_weeks:
-        filtered_df = filtered_df[filtered_df['week_start_date'].isin(selected_weeks)]
-    if selected_regions:
-        filtered_df = filtered_df[filtered_df['region'].isin(selected_regions)]
-    if selected_cities:
-        filtered_df = filtered_df[filtered_df['city'].isin(selected_cities)]
-    if selected_stores:
-        filtered_df = filtered_df[filtered_df['store_name'].isin(selected_stores)]
-    if selected_formats:
-        filtered_df = filtered_df[filtered_df['store_format'].isin(selected_formats)]
-    if selected_categories:
-        filtered_df = filtered_df[filtered_df['product_category'].isin(selected_categories)]
-else:
-    filtered_df = pd.DataFrame()
+# Apply Filters
+filtered_df = merged_df.copy()
+if selected_weeks:
+    filtered_df = filtered_df[filtered_df['week_start_date'].isin(selected_weeks)]
+if selected_regions:
+    filtered_df = filtered_df[filtered_df['region'].isin(selected_regions)]
+if selected_cities:
+    filtered_df = filtered_df[filtered_df['city'].isin(selected_cities)]
+if selected_stores:
+    filtered_df = filtered_df[filtered_df['store_name'].isin(selected_stores)]
+if selected_formats:
+    filtered_df = filtered_df[filtered_df['store_format'].isin(selected_formats)]
+if selected_categories:
+    filtered_df = filtered_df[filtered_df['product_category'].isin(selected_categories)]
 
 # 10. Main Application Interface Header
 st.title("📊 Retail Sales Intelligence Dashboard")
 st.markdown("Multi-store operational tracking pipeline synthesizing **Weekly Status** and **Store Master** records.")
 
-# 11. Performance KPI Section (Displays '-' when no dataset is loaded)
-if data_loaded and not filtered_df.empty:
+# 11. Performance KPI Section
+if not filtered_df.empty:
     total_net_sales = filtered_df['net_sales'].sum()
     total_gross_sales = filtered_df['gross_sales'].sum()
     total_sales_target = filtered_df['sales_target'].sum()
@@ -342,34 +350,24 @@ if data_loaded and not filtered_df.empty:
     return_rate = (total_returns / total_gross_sales * 100) if total_gross_sales > 0 else 0.0
     discount_rate = (total_discounts / total_gross_sales * 100) if total_gross_sales > 0 else 0.0
 
-    net_sales_val = format_indian_currency(total_net_sales)
-    target_val = f"{target_achievement:.1f}%"
-    atv_val = format_indian_currency(atv)
-    return_val = f"{return_rate:.2f}%"
-    discount_val = f"{discount_rate:.2f}%"
+    kpi_col1, kpi_col2, kpi_col3, kpi_col4, kpi_col5 = st.columns(5)
+    with kpi_col1:
+        st.metric(label="Net Sales", value=format_indian_currency(total_net_sales))
+    with kpi_col2:
+        st.metric(label="Target Achievement (%)", value=f"{target_achievement:.1f}%")
+    with kpi_col3:
+        st.metric(label="Average Transaction Value (ATV)", value=format_indian_currency(atv))
+    with kpi_col4:
+        st.metric(label="Return Rate (%)", value=f"{return_rate:.2f}%")
+    with kpi_col5:
+        st.metric(label="Discount Rate (%)", value=f"{discount_rate:.2f}%")
 else:
-    net_sales_val = "-"
-    target_val = "-"
-    atv_val = "-"
-    return_val = "-"
-    discount_val = "-"
-
-kpi_col1, kpi_col2, kpi_col3, kpi_col4, kpi_col5 = st.columns(5)
-with kpi_col1:
-    st.metric(label="Net Sales", value=net_sales_val)
-with kpi_col2:
-    st.metric(label="Target Achievement (%)", value=target_val)
-with kpi_col3:
-    st.metric(label="Average Transaction Value (ATV)", value=atv_val)
-with kpi_col4:
-    st.metric(label="Return Rate (%)", value=return_val)
-with kpi_col5:
-    st.metric(label="Discount Rate (%)", value=discount_val)
+    st.warning("No data matches selected filter settings.")
 
 st.markdown("---")
 
-# 12. Visualizations, Insights and Export (Rendered conditionally on load state)
-if data_loaded and not filtered_df.empty:
+# 12. Visualization Layout
+if not filtered_df.empty:
     chart_row1_col1, chart_row1_col2 = st.columns(2)
     
     with chart_row1_col1:
@@ -378,6 +376,7 @@ if data_loaded and not filtered_df.empty:
         df_week = df_week.sort_values(by='date_parsed')
         df_week['net_sales_formatted'] = df_week['net_sales'].apply(format_indian_currency)
         
+        # Plot with custom hover mappings to display formatted values
         fig_trend = px.line(
             df_week, x='week_start_date', y='net_sales', 
             title='Weekly Net Sales Trend', markers=True, template='plotly_white',
@@ -458,12 +457,13 @@ if data_loaded and not filtered_df.empty:
     )
     st.plotly_chart(fig_stockout, use_container_width=True)
 
-    st.markdown("---")
+st.markdown("---")
 
-    # Automated Business Insights
-    st.subheader("🤖 Automated Business Insights")
-    compiled_insights = []
+# 13. Automated Business Insights Module
+st.subheader("🤖 Automated Business Insights")
+compiled_insights = []
 
+if not filtered_df.empty:
     region_sales = filtered_df.groupby('region')['net_sales'].sum()
     if not region_sales.empty:
         best_region = region_sales.idxmax()
@@ -494,14 +494,18 @@ if data_loaded and not filtered_df.empty:
         
     for item in compiled_insights:
         st.markdown(item)
+else:
+    st.info("Insufficient data to yield business evaluations.")
 
-    st.markdown("---")
+st.markdown("---")
 
-    # View and Insights Export Features
-    st.subheader("📥 Export Filtered Views & Insights")
+# 14. View and Insights Export Features (Fixes final file export bug)
+st.subheader("📥 Export Filtered Views & Insights")
+if not filtered_df.empty:
     export_col1, export_col2 = st.columns(2)
     
     with export_col1:
+        # Export raw data (actual filtered view matching user uploads)
         filtered_csv = convert_df_to_csv(filtered_df)
         st.download_button(
             label="Download Filtered Joined View as CSV",
@@ -512,6 +516,7 @@ if data_loaded and not filtered_df.empty:
         )
         
     with export_col2:
+        # Export Compiled business summary text
         raw_text_insights = "\n".join([text.replace("**", "") for text in compiled_insights])
         st.download_button(
             label="Download Automated Business Insights as TXT",
@@ -520,10 +525,5 @@ if data_loaded and not filtered_df.empty:
             mime='text/plain',
             use_container_width=True
         )
-
 else:
-    # App is awaiting dataset upload
-    if not data_loaded:
-        st.info("👋 **Awaiting Data Ingestion**: Please upload both the **Store Master** and the **Retail Weekly Status** files in the sidebar to activate interactive filters, charts, and business insights.")
-    elif filtered_df.empty:
-        st.warning("⚠️ **Filter Conflict**: No matching results correspond to the selected filter criteria. Please widen your filters in the sidebar.")
+    st.button("Download Filtered Joined View as CSV", disabled=True)

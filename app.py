@@ -30,7 +30,7 @@ st.markdown(
 
 # 2. General Helper Utilities & Cache Functions
 def convert_df_to_csv(dataframe):
-    """Converts a dataframe to a downloadable CSV byte stream dynamically."""
+    """Converts a dataframe to a downloadable CSV byte stream dynamically without caching."""
     return dataframe.to_csv(index=False).encode('utf-8')
 
 @st.cache_data
